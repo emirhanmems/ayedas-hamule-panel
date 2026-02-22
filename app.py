@@ -171,7 +171,8 @@ def score_windows(g: pd.DataFrame, window_hours: int = 2) -> pd.DataFrame:
 
 def attach_demand_at_window_end(recs: pd.DataFrame, hourly: pd.DataFrame) -> pd.DataFrame:
     """
-    Öneri pencerelerinin bitiş saatindeki demand değerini de ekleyelim.
+    Öneri pencerelerinin bitiş saatindeki demand değerini de ekler.
+    Güvenli: merge sonrası kolon isimleri değişse bile patlamaz.
     """
     if recs.empty:
         return recs
@@ -179,12 +180,19 @@ def attach_demand_at_window_end(recs: pd.DataFrame, hourly: pd.DataFrame) -> pd.
     h = hourly[["dm_id", "trafo_id", "timestamp", "demand_kva"]].copy()
     r = recs.copy()
     r["window_end"] = pd.to_datetime(r["window_end"])
+
     merged = r.merge(
         h,
         left_on=["dm_id", "trafo_id", "window_end"],
         right_on=["dm_id", "trafo_id", "timestamp"],
-        how="left"
-    ).drop(columns=["timestamp"])
+        how="left",
+        suffixes=("", "_hourly"),
+    )
+
+    # timestamp kolonunu güvenli şekilde kaldır (varsa)
+    if "timestamp" in merged.columns:
+        merged = merged.drop(columns=["timestamp"])
+
     return merged
 
 
@@ -417,4 +425,5 @@ with st.expander("🧠 Bu skor neye göre?"):
         Seçilen pencere süresi: {window_hours} saat.
         """
     )
+
 
