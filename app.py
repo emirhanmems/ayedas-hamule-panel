@@ -10,7 +10,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 
 
-APP_VERSION = "v8-15dk-algoritmik-pik-yuk-aktarim-googlemaps"
+APP_VERSION = "v10-temiz-tek-akis"
 
 SCADA_FILE_CANDIDATES = [
     "Sancaktepe Trafo demand 2025.xlsx",
@@ -34,8 +34,8 @@ DATA_ERROR_CAP_MULTIPLIER = 2.0
 SINGLE_SPIKE_CAP_MULTIPLIER = 1.20
 SINGLE_SPIKE_LOCAL_MULTIPLIER = 1.75
 
-ALGO_WINDOW_PERIODS = 8          # 15 dk x 8 = 2 saat
-MIN_VALID_WINDOW_PERIODS = 6     # 2 saatlik pencerede en az 6 geçerli ölçüm
+ALGO_WINDOW_PERIODS = 8
+MIN_VALID_WINDOW_PERIODS = 6
 
 
 def txt(x) -> str:
@@ -178,18 +178,14 @@ def load_scada_excel(path: str) -> pd.DataFrame:
         missing.append("Value")
 
     if missing:
-        raise ValueError(
-            f"SCADA dosyasında beklenen kolonlar yok: {missing}. Mevcut kolonlar: {list(df.columns)}"
-        )
+        raise ValueError(f"SCADA dosyasında beklenen kolonlar yok: {missing}. Mevcut kolonlar: {list(df.columns)}")
 
-    out = pd.DataFrame(
-        {
-            "point_name": df[point_col].map(txt),
-            "timestamp": pd.to_datetime(df[time_col], errors="coerce"),
-            "value": pd.to_numeric(df[value_col], errors="coerce"),
-            "quality": df[quality_col].map(txt) if quality_col else "Unknown",
-        }
-    )
+    out = pd.DataFrame({
+        "point_name": df[point_col].map(txt),
+        "timestamp": pd.to_datetime(df[time_col], errors="coerce"),
+        "value": pd.to_numeric(df[value_col], errors="coerce"),
+        "quality": df[quality_col].map(txt) if quality_col else "Unknown",
+    })
 
     out = out.dropna(subset=["timestamp", "value"])
     out = out[out["point_name"].ne("")]
@@ -197,14 +193,6 @@ def load_scada_excel(path: str) -> pd.DataFrame:
 
 
 def parse_scada_point(point_name: str):
-    """
-    SCADA -> CBS eşleşmesi:
-    T-4092      -> T4092
-    RP_4004 DM  -> B4004
-    4100 DM     -> B4100
-    Enan1       -> TR1
-    Enan2       -> TR2
-    """
     p = txt(point_name)
     parts = p.split("/")
 
@@ -300,9 +288,7 @@ def load_cbs_excel(path: str) -> pd.DataFrame:
         missing.append("SCADA-RTU Var mı?")
 
     if missing:
-        raise ValueError(
-            f"CBS dosyasında beklenen kolonlar yok: {missing}. Mevcut kolonlar: {list(raw.columns)}"
-        )
+        raise ValueError(f"CBS dosyasında beklenen kolonlar yok: {missing}. Mevcut kolonlar: {list(raw.columns)}")
 
     out = raw.copy()
     out["montaj_yeri"] = out[montaj_col].map(txt)
@@ -315,14 +301,10 @@ def load_cbs_excel(path: str) -> pd.DataFrame:
     asset_col = find_col(out.columns, ["AssetID", "Asset ID"])
     ilce_col = find_col(out.columns, ["İlçe", "Ilce"])
     mahalle_col = find_col(out.columns, ["Mahalle"])
-    marka_col = find_col(out.columns, ["Marka"])
-    tipi_col = find_col(out.columns, ["Tipi"])
 
     out["asset_id"] = out[asset_col].map(txt) if asset_col else ""
     out["ilce"] = out[ilce_col].map(txt) if ilce_col else "Sancaktepe"
     out["mahalle"] = out[mahalle_col].map(txt) if mahalle_col else ""
-    out["marka"] = out[marka_col].map(txt) if marka_col else ""
-    out["tipi"] = out[tipi_col].map(txt) if tipi_col else ""
 
     lat_col = find_col(out.columns, ["lat", "latitude", "enlem"])
     lon_col = find_col(out.columns, ["lon", "lng", "longitude", "boylam"])
@@ -342,19 +324,13 @@ def load_cbs_excel(path: str) -> pd.DataFrame:
     out = out[out["montaj_key"].ne("") & out["tr_code"].ne("")]
     out = out.dropna(subset=["kurulu_guc_kva"])
     return out
-    def attach_cbs_capacity_to_scada(scada_clean: pd.DataFrame, cbs: pd.DataFrame) -> pd.DataFrame:
+
+
+def attach_cbs_capacity_to_scada(scada_clean: pd.DataFrame, cbs: pd.DataFrame) -> pd.DataFrame:
     cbs_scada = cbs[cbs["scada_rtu_var"]].copy()
     cbs_scada = cbs_scada.drop_duplicates(["montaj_key", "tr_code"], keep="first")
 
-    keep_cols = [
-        "montaj_key",
-        "tr_code",
-        "kurulu_guc_kva",
-        "mahalle",
-        "montaj_yeri",
-        "asset_id",
-    ]
-
+    keep_cols = ["montaj_key", "tr_code", "kurulu_guc_kva", "mahalle", "montaj_yeri", "asset_id"]
     return scada_clean.merge(cbs_scada[keep_cols], on=["montaj_key", "tr_code"], how="left")
 
 
@@ -364,38 +340,21 @@ def filter_scada_data_errors(scada_with_cbs: pd.DataFrame):
 
     d.loc[d["value"].isna(), "veri_hatasi_nedeni"] = "Boş demand"
     d.loc[d["value"] <= 0, "veri_hatasi_nedeni"] = "Sıfır veya negatif demand"
-
-    d.loc[
-        d["value"] > DATA_ERROR_ABS_MAX_KVA,
-        "veri_hatasi_nedeni",
-    ] = f"{DATA_ERROR_ABS_MAX_KVA} kVA üstü mantıksız demand"
+    d.loc[d["value"] > DATA_ERROR_ABS_MAX_KVA, "veri_hatasi_nedeni"] = f"{DATA_ERROR_ABS_MAX_KVA} kVA üstü mantıksız demand"
 
     has_capacity = d["kurulu_guc_kva"].notna() & (d["kurulu_guc_kva"] > 0)
-
-    too_high_vs_capacity = has_capacity & (
-        d["value"] > d["kurulu_guc_kva"] * DATA_ERROR_CAP_MULTIPLIER
-    )
-
-    d.loc[
-        too_high_vs_capacity,
-        "veri_hatasi_nedeni",
-    ] = f"Kurulu gücün {DATA_ERROR_CAP_MULTIPLIER} katından yüksek demand"
+    too_high_vs_capacity = has_capacity & (d["value"] > d["kurulu_guc_kva"] * DATA_ERROR_CAP_MULTIPLIER)
+    d.loc[too_high_vs_capacity, "veri_hatasi_nedeni"] = f"Kurulu gücün {DATA_ERROR_CAP_MULTIPLIER} katından yüksek demand"
 
     d = d.sort_values(["montaj_key", "tr_code", "timestamp"]).copy()
 
-    for (montaj_key, tr_code), idx in d.groupby(["montaj_key", "tr_code"]).groups.items():
+    for _, idx in d.groupby(["montaj_key", "tr_code"]).groups.items():
         g = d.loc[idx].sort_values("timestamp").copy()
 
         if len(g) < 5:
             continue
 
-        local_median = (
-            g["value"]
-            .astype(float)
-            .rolling(window=5, center=True, min_periods=3)
-            .median()
-        )
-
+        local_median = g["value"].astype(float).rolling(window=5, center=True, min_periods=3).median()
         cap = g["kurulu_guc_kva"].astype(float)
 
         single_spike = (
@@ -408,35 +367,20 @@ def filter_scada_data_errors(scada_with_cbs: pd.DataFrame):
             & (g["value"] > local_median * SINGLE_SPIKE_LOCAL_MULTIPLIER)
         )
 
-        d.loc[g.index[single_spike], "veri_hatasi_nedeni"] = (
-            "Tekil sıçrama / demeraj benzeri demand anomalisi"
-        )
+        d.loc[g.loc[single_spike].index, "veri_hatasi_nedeni"] = "Tekil sıçrama / demeraj benzeri demand anomalisi"
 
     errors = d[d["veri_hatasi_nedeni"].ne("")].copy()
     clean = d[d["veri_hatasi_nedeni"].eq("")].copy()
-
     return clean, errors
 
 
 def aggregate_scada(clean_scada: pd.DataFrame) -> pd.DataFrame:
     if clean_scada.empty:
-        return pd.DataFrame(
-            columns=[
-                "montaj_key",
-                "tr_code",
-                "timestamp",
-                "demand_kva",
-                "sample_count",
-                "dm_label",
-                "h_cell",
-            ]
-        )
+        return pd.DataFrame(columns=["montaj_key", "tr_code", "timestamp", "demand_kva", "sample_count", "dm_label", "h_cell"])
 
     x = clean_scada.copy()
     x["timestamp"] = pd.to_datetime(x["timestamp"], errors="coerce")
     x = x.dropna(subset=["timestamp"])
-
-    # SCADA 15 dakikalık veri olduğu için 15 dk kovaya indiriyoruz.
     x["period"] = x["timestamp"].dt.floor("15min")
 
     agg = (
@@ -455,12 +399,6 @@ def aggregate_scada(clean_scada: pd.DataFrame) -> pd.DataFrame:
 
 
 def score_algorithmic_peak_window(g: pd.DataFrame, window_periods: int = ALGO_WINDOW_PERIODS) -> dict:
-    """
-    Algoritmik pik:
-    15 dakikalık veride 2 saatlik yüksek ve stabil pencere aranır.
-    Pencere ortalaması yüksekse skor artar.
-    Oynaklık ve ani değişim yüksekse skor düşer.
-    """
     y = g.sort_values("timestamp").copy()
     s = y["demand_kva"].astype(float)
 
@@ -487,33 +425,18 @@ def score_algorithmic_peak_window(g: pd.DataFrame, window_periods: int = ALGO_WI
         }
 
     smoothed = s.rolling(window=3, min_periods=1, center=True).median()
-
-    roll_mean = smoothed.rolling(
-        window_periods,
-        min_periods=MIN_VALID_WINDOW_PERIODS,
-    ).mean()
-
-    roll_std = smoothed.rolling(
-        window_periods,
-        min_periods=MIN_VALID_WINDOW_PERIODS,
-    ).std().fillna(0)
-
-    roll_diff = smoothed.diff().abs().rolling(
-        window_periods,
-        min_periods=MIN_VALID_WINDOW_PERIODS,
-    ).mean().fillna(0)
+    roll_mean = smoothed.rolling(window_periods, min_periods=MIN_VALID_WINDOW_PERIODS).mean()
+    roll_std = smoothed.rolling(window_periods, min_periods=MIN_VALID_WINDOW_PERIODS).std().fillna(0)
+    roll_diff = smoothed.diff().abs().rolling(window_periods, min_periods=MIN_VALID_WINDOW_PERIODS).mean().fillna(0)
 
     def z(v):
         arr = v.to_numpy(dtype=float)
         if np.all(np.isnan(arr)):
             return np.full_like(arr, np.nan, dtype=float)
-
         mu = np.nanmean(arr)
         sd = np.nanstd(arr)
-
         if not np.isfinite(sd) or sd == 0:
             sd = 1e-9
-
         return (arr - mu) / sd
 
     score = pd.Series(
@@ -553,34 +476,28 @@ def scada_metrics(fifteen_min: pd.DataFrame) -> pd.DataFrame:
     for (montaj_key, tr_code), g in fifteen_min.groupby(["montaj_key", "tr_code"]):
         y = g.sort_values("timestamp")
         s = y["demand_kva"].astype(float)
-        peak = score_algorithmic_peak_window(y, window_periods=ALGO_WINDOW_PERIODS)
+        peak = score_algorithmic_peak_window(y)
 
-        rows.append(
-            {
-                "montaj_key": montaj_key,
-                "tr_code": tr_code,
-                "dm_label": y["dm_label"].iloc[-1] if "dm_label" in y else "",
-                "h_cell": ", ".join(
-                    sorted({txt(v) for v in y.get("h_cell", pd.Series(dtype=str)) if txt(v)})
-                ),
-                "veri_adedi": int(len(y)),
-                "ilk_veri": y["timestamp"].min(),
-                "son_veri": y["timestamp"].max(),
-                "algoritmik_pik_demand_kva": peak["algoritmik_pik_demand_kva"],
-                "algoritmik_pik_baslangic": peak["algoritmik_pik_baslangic"],
-                "algoritmik_pik_bitis": peak["algoritmik_pik_bitis"],
-                "algoritmik_pik_skor": peak["algoritmik_pik_skor"],
-                "ham_maksimum_demand_kva": peak["ham_maksimum_demand_kva"],
-                "ham_maksimum_demand_zamani": peak["ham_maksimum_demand_zamani"],
-                "ortalama_demand_kva": float(s.mean()),
-                "p95_demand_kva": float(s.quantile(0.95)),
-            }
-        )
+        rows.append({
+            "montaj_key": montaj_key,
+            "tr_code": tr_code,
+            "dm_label": y["dm_label"].iloc[-1] if "dm_label" in y else "",
+            "h_cell": ", ".join(sorted({txt(v) for v in y.get("h_cell", pd.Series(dtype=str)) if txt(v)})),
+            "veri_adedi": int(len(y)),
+            "ilk_veri": y["timestamp"].min(),
+            "son_veri": y["timestamp"].max(),
+            "algoritmik_pik_demand_kva": peak["algoritmik_pik_demand_kva"],
+            "algoritmik_pik_baslangic": peak["algoritmik_pik_baslangic"],
+            "algoritmik_pik_bitis": peak["algoritmik_pik_bitis"],
+            "algoritmik_pik_skor": peak["algoritmik_pik_skor"],
+            "ham_maksimum_demand_kva": peak["ham_maksimum_demand_kva"],
+            "ham_maksimum_demand_zamani": peak["ham_maksimum_demand_zamani"],
+            "ortalama_demand_kva": float(s.mean()),
+            "p95_demand_kva": float(s.quantile(0.95)),
+        })
 
     return pd.DataFrame(rows)
-
-
-def build_google_search_query(row) -> str:
+    def build_google_search_query(row) -> str:
     parts = [
         "AYEDAŞ trafo",
         txt(row.get("montaj_yeri", "")),
@@ -594,7 +511,6 @@ def build_google_search_query(row) -> str:
 
 def add_google_map_fields(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-
     out["google_maps_arama"] = out.apply(build_google_search_query, axis=1)
     out["google_maps_link"] = out["google_maps_arama"].apply(
         lambda q: "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)
@@ -602,7 +518,6 @@ def add_google_map_fields(df: pd.DataFrame) -> pd.DataFrame:
     out["google_maps_embed"] = out["google_maps_arama"].apply(
         lambda q: "https://www.google.com/maps?q=" + quote_plus(q) + "&output=embed"
     )
-
     return out
 
 
@@ -613,40 +528,38 @@ def build_analysis(cbs: pd.DataFrame, fifteen_min: pd.DataFrame, new_request_kva
     metrics = scada_metrics(fifteen_min)
 
     if metrics.empty:
-        metrics = pd.DataFrame(
-            columns=[
-                "montaj_key",
-                "tr_code",
-                "veri_adedi",
-                "algoritmik_pik_demand_kva",
-                "algoritmik_pik_baslangic",
-                "algoritmik_pik_bitis",
-                "algoritmik_pik_skor",
-                "ham_maksimum_demand_kva",
-                "ham_maksimum_demand_zamani",
-            ]
-        )
+        metrics = pd.DataFrame(columns=[
+            "montaj_key",
+            "tr_code",
+            "veri_adedi",
+            "algoritmik_pik_demand_kva",
+            "algoritmik_pik_baslangic",
+            "algoritmik_pik_bitis",
+            "algoritmik_pik_skor",
+            "ham_maksimum_demand_kva",
+            "ham_maksimum_demand_zamani",
+        ])
 
     analysis = cbs_scada.merge(metrics, on=["montaj_key", "tr_code"], how="left")
 
     analysis["yuklenme_orani_pct"] = (
         analysis["algoritmik_pik_demand_kva"] / analysis["kurulu_guc_kva"] * 100
     )
-
     analysis["risk_seviyesi"] = analysis["yuklenme_orani_pct"].apply(risk_level)
     analysis["risk_sira"] = analysis["risk_seviyesi"].apply(risk_order_value)
-    analysis["bos_kapasite_kva"] = analysis["kurulu_guc_kva"] - analysis["algoritmik_pik_demand_kva"]
+    analysis["bos_kapasite_kva"] = (
+        analysis["kurulu_guc_kva"] - analysis["algoritmik_pik_demand_kva"]
+    )
 
     request = float(new_request_kva)
-
     analysis["yeni_talep_kva"] = request
-    analysis["yeni_talep_sonrasi_demand_kva"] = analysis["algoritmik_pik_demand_kva"] + request
+    analysis["yeni_talep_sonrasi_demand_kva"] = (
+        analysis["algoritmik_pik_demand_kva"] + request
+    )
     analysis["yeni_talep_sonrasi_yuklenme_pct"] = (
         analysis["yeni_talep_sonrasi_demand_kva"] / analysis["kurulu_guc_kva"] * 100
     )
-    analysis["yeni_talep_karari"] = analysis["yeni_talep_sonrasi_yuklenme_pct"].apply(
-        connection_decision
-    )
+    analysis["yeni_talep_karari"] = analysis["yeni_talep_sonrasi_yuklenme_pct"].apply(connection_decision)
 
     if fifteen_min.empty:
         scada_pairs = pd.DataFrame(columns=["montaj_key", "tr_code"])
@@ -656,12 +569,18 @@ def build_analysis(cbs: pd.DataFrame, fifteen_min: pd.DataFrame, new_request_kva
     cbs_pairs = cbs_scada[["montaj_key", "tr_code"]].drop_duplicates()
 
     cbs_no_data = cbs_scada.merge(
-        scada_pairs, on=["montaj_key", "tr_code"], how="left", indicator=True
+        scada_pairs,
+        on=["montaj_key", "tr_code"],
+        how="left",
+        indicator=True,
     )
     cbs_no_data = cbs_no_data[cbs_no_data["_merge"].eq("left_only")].drop(columns=["_merge"])
 
     scada_no_cbs = scada_pairs.merge(
-        cbs_pairs, on=["montaj_key", "tr_code"], how="left", indicator=True
+        cbs_pairs,
+        on=["montaj_key", "tr_code"],
+        how="left",
+        indicator=True,
     )
     scada_no_cbs = scada_no_cbs[scada_no_cbs["_merge"].eq("left_only")].drop(columns=["_merge"])
 
@@ -687,7 +606,6 @@ def recommend_transfer_candidates(analysis: pd.DataFrame, selected_key, transfer
     selected_load = row["yuklenme_orani_pct"]
 
     candidates = analysis.copy()
-
     candidates = candidates[
         candidates["mahalle"].astype(str).eq(mahalle)
         & ~(
@@ -709,9 +627,7 @@ def recommend_transfer_candidates(analysis: pd.DataFrame, selected_key, transfer
     candidates["aktarim_sonrasi_yuklenme_pct"] = (
         candidates["aktarim_sonrasi_demand_kva"] / candidates["kurulu_guc_kva"] * 100
     )
-    candidates["aktarim_sonrasi_risk"] = candidates["aktarim_sonrasi_yuklenme_pct"].apply(
-        risk_level
-    )
+    candidates["aktarim_sonrasi_risk"] = candidates["aktarim_sonrasi_yuklenme_pct"].apply(risk_level)
 
     return candidates.sort_values(
         ["bos_kapasite_kva", "yuklenme_orani_pct"],
@@ -740,13 +656,10 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             arr = v.to_numpy(dtype=float)
             if np.all(np.isnan(arr)):
                 return np.full_like(arr, np.nan, dtype=float)
-
             mu = np.nanmean(arr)
             sd = np.nanstd(arr)
-
             if not np.isfinite(sd) or sd == 0:
                 sd = 1e-9
-
             return (arr - mu) / sd
 
         y["pencere_ortalama_kva"] = roll_mean
@@ -768,25 +681,23 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             top["window_end"] = top["timestamp"]
             top["window_start"] = top["timestamp"] - step * (ALGO_WINDOW_PERIODS - 1)
 
-            recs.append(
-                top[
-                    [
-                        "montaj_key",
-                        "tr_code",
-                        "window_start",
-                        "window_end",
-                        "demand_kva",
-                        "pencere_ortalama_kva",
-                        "score",
-                    ]
-                ]
-            )
+            recs.append(top[[
+                "montaj_key",
+                "tr_code",
+                "window_start",
+                "window_end",
+                "demand_kva",
+                "pencere_ortalama_kva",
+                "score",
+            ]])
 
     if recs:
         return pd.concat(recs, ignore_index=True)
 
     return pd.DataFrame()
-    def main():
+
+
+def main():
     st.set_page_config(page_title="AYEDAŞ | Trafo Risk ve Yük Aktarım Paneli", layout="wide")
 
     st.title("⚡ CBS Entegre Mahalle Bazlı Trafo Risk Analizi ve Yük Aktarım Öneri Sistemi")
@@ -812,19 +723,13 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
 
         st.divider()
         st.header("Yeni Bağlantı")
-        new_request_kva = st.number_input(
-            "Yeni talep (kVA)",
-            min_value=1.0,
-            value=50.0,
-            step=10.0,
-        )
+        new_request_kva = st.number_input("Yeni talep (kVA)", min_value=1.0, value=50.0, step=10.0)
 
         st.divider()
         st.header("Algoritma Notu")
         st.caption("Algoritmik Pik: 15 dk veride 2 saatlik yüksek ve stabil pencere.")
         st.caption("Yüklenme = Algoritmik Pik Demand / Trafo Gücü × 100")
         st.caption("0-60: Düşük | 60-80: Orta | 80-100: Yüksek | 100+: Kritik")
-        st.caption("Harita: CBS koordinatı yoksa Google Maps arama linki/iframe gösterilir.")
 
     if not scada_file:
         st.error("SCADA Excel dosyası bulunamadı. Dosya adını repo kökünde 'Sancaktepe Trafo demand 2025.xlsx' yap.")
@@ -838,21 +743,12 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
         scada_raw = load_scada_excel(str(scada_file))
         cbs_raw = load_cbs_excel(str(cbs_file))
 
-        scada_prepared = prepare_scada(
-            scada_raw,
-            only_valid=only_valid,
-            remove_zeros=remove_zeros,
-        )
-
+        scada_prepared = prepare_scada(scada_raw, only_valid=only_valid, remove_zeros=remove_zeros)
         scada_with_cbs = attach_cbs_capacity_to_scada(scada_prepared, cbs_raw)
         scada_clean, scada_errors = filter_scada_data_errors(scada_with_cbs)
         fifteen_min = aggregate_scada(scada_clean)
 
-        analysis, cbs_no_data, scada_no_cbs = build_analysis(
-            cbs_raw,
-            fifteen_min,
-            new_request_kva,
-        )
+        analysis, cbs_no_data, scada_no_cbs = build_analysis(cbs_raw, fifteen_min, new_request_kva)
 
     except Exception as e:
         st.error(f"Dosyalar okunurken hata oluştu: {type(e).__name__}: {e}")
@@ -862,13 +758,10 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
 
     matched = analysis[analysis["veri_adedi"].notna()].copy()
     critical = matched[matched["risk_seviyesi"].eq("Kritik Risk")].copy()
-    high_or_critical = matched[
-        matched["risk_seviyesi"].isin(["Yüksek Risk", "Kritik Risk"])
-    ].copy()
+    high_or_critical = matched[matched["risk_seviyesi"].isin(["Yüksek Risk", "Kritik Risk"])].copy()
     investment_needed = analysis[analysis["yeni_talep_karari"].eq("Yatırım Gerekli")].copy()
 
     k1, k2, k3, k4, k5, k6 = st.columns(6)
-
     k1.metric("CBS SCADA-RTU = Evet", f"{len(analysis):,}")
     k2.metric("Eşleşen Trafo", f"{len(matched):,}")
     k3.metric("Yüksek + Kritik", f"{len(high_or_critical):,}")
@@ -876,16 +769,14 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
     k5.metric("Filtrelenen Veri Hatası", f"{len(scada_errors):,}")
     k6.metric("Yeni Talepte Yatırım", f"{len(investment_needed):,}")
 
-    tab_risk, tab_map, tab_transfer, tab_connection, tab_detail, tab_quality = st.tabs(
-        [
-            "📊 Riskli Trafolar",
-            "🗺️ CBS Harita / Google Maps",
-            "🔁 Yük Aktarım Önerisi",
-            "🧮 Yeni Bağlantı",
-            "🔍 Trafo Detay",
-            "🧹 Veri Kalitesi",
-        ]
-    )
+    tab_risk, tab_map, tab_transfer, tab_connection, tab_detail, tab_quality = st.tabs([
+        "📊 Riskli Trafolar",
+        "🗺️ CBS Harita / Google Maps",
+        "🔁 Yük Aktarım Önerisi",
+        "🧮 Yeni Bağlantı",
+        "🔍 Trafo Detay",
+        "🧹 Veri Kalitesi",
+    ])
 
     main_cols = [
         "montaj_yeri",
@@ -922,36 +813,19 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
 
     with tab_risk:
         st.subheader("Riskli trafolar listesi")
-        st.info(
-            "Yüklenme Oranı = Algoritmik Pik Demand / Trafo Gücü × 100. "
-            "Algoritmik pik 15 dakikalık veride 2 saatlik yüksek ve stabil pencereyle seçilir."
-        )
+        st.info("Yüklenme Oranı = Algoritmik Pik Demand / Trafo Gücü × 100.")
 
         f1, f2, f3 = st.columns([1, 1, 2])
 
         with f1:
             risk_filter = st.multiselect(
                 "Risk seviyesi",
-                [
-                    "Kritik Risk",
-                    "Yüksek Risk",
-                    "Orta Risk",
-                    "Düşük Risk",
-                    "SCADA Verisi Yok",
-                ],
-                default=[
-                    "Kritik Risk",
-                    "Yüksek Risk",
-                    "Orta Risk",
-                    "Düşük Risk",
-                    "SCADA Verisi Yok",
-                ],
+                ["Kritik Risk", "Yüksek Risk", "Orta Risk", "Düşük Risk", "SCADA Verisi Yok"],
+                default=["Kritik Risk", "Yüksek Risk", "Orta Risk", "Düşük Risk", "SCADA Verisi Yok"],
             )
 
         with f2:
-            mahalleler = sorted(
-                [m for m in analysis["mahalle"].dropna().astype(str).unique() if m]
-            )
+            mahalleler = sorted([m for m in analysis["mahalle"].dropna().astype(str).unique() if m])
             mahalle_filter = st.multiselect("Mahalle", mahalleler)
 
         with f3:
@@ -973,11 +847,7 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 | view["tr_code"].astype(str).str.upper().str.contains(s, na=False)
             ]
 
-        view = view.sort_values(
-            ["risk_sira", "yuklenme_orani_pct"],
-            ascending=[False, False],
-            na_position="last",
-        )
+        view = view.sort_values(["risk_sira", "yuklenme_orani_pct"], ascending=[False, False], na_position="last")
 
         st.dataframe(
             view[main_cols].rename(columns=main_rename),
@@ -987,34 +857,18 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 "Trafo Gücü (kVA)": st.column_config.NumberColumn(format="%.0f"),
                 "Algoritmik Pik Demand (kVA)": st.column_config.NumberColumn(format="%.2f"),
                 "Ham Maksimum Demand (kVA)": st.column_config.NumberColumn(format="%.2f"),
-                "Yüklenme Oranı (%)": st.column_config.ProgressColumn(
-                    min_value=0,
-                    max_value=150,
-                    format="%.1f%%",
-                ),
+                "Yüklenme Oranı (%)": st.column_config.ProgressColumn(min_value=0, max_value=150, format="%.1f%%"),
                 "Boş Kapasite (kVA)": st.column_config.NumberColumn(format="%.2f"),
-                "Google Maps": st.column_config.LinkColumn(
-                    "Google Maps",
-                    display_text="Haritada ara",
-                ),
+                "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Haritada ara"),
             },
         )
 
         csv = view[main_cols].rename(columns=main_rename).to_csv(index=False).encode("utf-8-sig")
-        st.download_button(
-            "⬇️ Risk analizini CSV indir",
-            csv,
-            "trafo_risk_analizi.csv",
-            "text/csv",
-        )
+        st.download_button("⬇️ Risk analizini CSV indir", csv, "trafo_risk_analizi.csv", "text/csv")
 
         chart = view.dropna(subset=["yuklenme_orani_pct"]).head(20).copy()
-
         if not chart.empty:
-            chart["Etiket"] = (
-                chart["montaj_yeri"].astype(str) + " / " + chart["tr_code"].astype(str)
-            )
-
+            chart["Etiket"] = chart["montaj_yeri"].astype(str) + " / " + chart["tr_code"].astype(str)
             fig = px.bar(
                 chart.sort_values("yuklenme_orani_pct"),
                 x="yuklenme_orani_pct",
@@ -1022,23 +876,18 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 orientation="h",
                 color="risk_seviyesi",
                 title="En yüksek yüklenme oranına sahip ilk 20 trafo",
-                labels={
-                    "yuklenme_orani_pct": "Yüklenme Oranı (%)",
-                    "risk_seviyesi": "Risk",
-                },
+                labels={"yuklenme_orani_pct": "Yüklenme Oranı (%)", "risk_seviyesi": "Risk"},
             )
-
             fig.add_vline(x=60, line_dash="dash", annotation_text="%60")
             fig.add_vline(x=80, line_dash="dash", annotation_text="%80")
             fig.add_vline(x=100, line_dash="dash", annotation_text="%100")
-
             st.plotly_chart(fig, use_container_width=True)
 
     with tab_map:
         st.subheader("CBS Harita / Google Maps")
         st.warning(
             "CBS dosyasında gerçek koordinat yoksa Google Maps yalnızca arama sonucu gösterir. "
-            "Bu kesin trafo konumu değildir, karar öncesi CBS/saha koordinatıyla doğrulanmalıdır."
+            "Bu kesin trafo konumu değildir, saha/CBS ile doğrulanmalıdır."
         )
 
         map_data = analysis.dropna(subset=["lat", "lon", "yuklenme_orani_pct"]).copy()
@@ -1064,86 +913,39 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 zoom=11,
                 height=650,
             )
-
-            fig.update_layout(
-                mapbox_style="open-street-map",
-                margin={"r": 0, "t": 0, "l": 0, "b": 0},
-            )
-
+            fig.update_layout(mapbox_style="open-street-map", margin={"r": 0, "t": 0, "l": 0, "b": 0})
             st.plotly_chart(fig, use_container_width=True)
         else:
-            st.info(
-                "Toplu nokta haritası için CBS dosyasında enlem/boylam yok. "
-                "Aşağıdan seçilen trafo Google Maps üzerinde aranabilir."
+            st.info("Toplu nokta haritası için CBS dosyasında enlem/boylam yok. Aşağıdan Google Maps araması yapılabilir.")
+
+        if analysis.empty:
+            st.warning("Haritada aranacak kayıt yok.")
+        else:
+            map_options = analysis.copy()
+            map_options["secim"] = (
+                map_options["montaj_yeri"].astype(str)
+                + " / "
+                + map_options["tr_code"].astype(str)
+                + " | "
+                + map_options["mahalle"].astype(str)
             )
 
-        map_options = analysis.copy()
-        map_options["secim"] = (
-            map_options["montaj_yeri"].astype(str)
-            + " / "
-            + map_options["tr_code"].astype(str)
-            + " | "
-            + map_options["mahalle"].astype(str)
-        )
+            selected_map = st.selectbox("Google Maps üzerinde trafo/adres ara", map_options["secim"].tolist())
+            selected_row = map_options[map_options["secim"].eq(selected_map)].iloc[0]
 
-        selected_map = st.selectbox(
-            "Google Maps üzerinde trafo/adres ara",
-            map_options["secim"].tolist(),
-        )
-
-        selected_row = map_options[map_options["secim"].eq(selected_map)].iloc[0]
-
-        st.link_button("Google Maps'te aç", selected_row["google_maps_link"])
-
-        components.iframe(
-            selected_row["google_maps_embed"],
-            height=500,
-            scrolling=False,
-        )
-
-        map_cols = [
-            "montaj_yeri",
-            "tr_code",
-            "mahalle",
-            "ilce",
-            "risk_seviyesi",
-            "yuklenme_orani_pct",
-            "konum_kaynagi",
-            "google_maps_link",
-        ]
-
-        st.dataframe(
-            analysis[map_cols].rename(columns=main_rename),
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Yüklenme Oranı (%)": st.column_config.ProgressColumn(
-                    min_value=0,
-                    max_value=150,
-                    format="%.1f%%",
-                ),
-                "Google Maps": st.column_config.LinkColumn(
-                    "Google Maps",
-                    display_text="Haritada ara",
-                ),
-            },
-        )
+            st.link_button("Google Maps'te aç", selected_row["google_maps_link"])
+            components.iframe(selected_row["google_maps_embed"], height=500, scrolling=False)
 
     with tab_transfer:
         st.subheader("Mahalle bazlı yük aktarım öneri modülü")
-        st.info(
-            "Sistem doğrudan yük aktarımı kararı vermez. Aynı mahallede daha düşük yüklenmiş ve boş kapasitesi olan trafoları aday olarak sıralar."
-        )
+        st.info("Aynı mahallede daha düşük yüklenmiş ve boş kapasitesi olan trafolar aday olarak sıralanır.")
 
-        selectable = matched[
-            matched["risk_seviyesi"].isin(["Kritik Risk", "Yüksek Risk"])
-        ].copy()
+        selectable = matched[matched["risk_seviyesi"].isin(["Kritik Risk", "Yüksek Risk"])].copy()
 
         if selectable.empty:
             st.success("Yüksek veya kritik riskli trafo bulunamadı.")
         else:
             selectable = selectable.sort_values("yuklenme_orani_pct", ascending=False)
-
             selectable["secim"] = (
                 selectable["montaj_yeri"].astype(str)
                 + " / "
@@ -1157,19 +959,11 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             selected_label = st.selectbox("Riskli trafo seç", selectable["secim"].tolist())
             selected_row = selectable[selectable["secim"].eq(selected_label)].iloc[0]
 
-            overload_kva = max(
-                0.0,
-                float(selected_row["algoritmik_pik_demand_kva"] - selected_row["kurulu_guc_kva"]),
-            )
-
+            overload_kva = max(0.0, float(selected_row["algoritmik_pik_demand_kva"] - selected_row["kurulu_guc_kva"]))
             default_transfer = round(overload_kva, 2) if overload_kva > 0 else 50.0
 
             c1, c2, c3, c4 = st.columns(4)
-
-            c1.metric(
-                "Seçili Trafo",
-                f"{selected_row['montaj_yeri']} / {selected_row['tr_code']}",
-            )
+            c1.metric("Seçili Trafo", f"{selected_row['montaj_yeri']} / {selected_row['tr_code']}")
             c2.metric("Mahalle", selected_row["mahalle"])
             c3.metric("Yüklenme", fmt(selected_row["yuklenme_orani_pct"], 1, "%"))
             c4.metric("100% Üstü Fazla Yük", fmt(overload_kva, 2, " kVA"))
@@ -1179,7 +973,6 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 min_value=0.0,
                 value=float(default_transfer),
                 step=10.0,
-                help="Aday trafonun boş kapasitesi bu değerden büyük olmalı.",
             )
 
             candidates = recommend_transfer_candidates(
@@ -1226,25 +1019,14 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                     use_container_width=True,
                     hide_index=True,
                     column_config={
-                        "Mevcut Yüklenme (%)": st.column_config.ProgressColumn(
-                            min_value=0,
-                            max_value=150,
-                            format="%.1f%%",
-                        ),
-                        "Aktarım Sonrası Yüklenme (%)": st.column_config.ProgressColumn(
-                            min_value=0,
-                            max_value=150,
-                            format="%.1f%%",
-                        ),
-                        "Google Maps": st.column_config.LinkColumn(
-                            "Google Maps",
-                            display_text="Haritada ara",
-                        ),
+                        "Mevcut Yüklenme (%)": st.column_config.ProgressColumn(min_value=0, max_value=150, format="%.1f%%"),
+                        "Aktarım Sonrası Yüklenme (%)": st.column_config.ProgressColumn(min_value=0, max_value=150, format="%.1f%%"),
+                        "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Haritada ara"),
                     },
                 )
 
                 st.warning(
-                    "Öneriler karar destek amaçlıdır. AG şebeke bağlantıları, kablo güzergahları, faz dengesi, gerilim düşümü ve saha uygunluğu kontrol edilmeden gerçek yük aktarımı yapılmamalıdır."
+                    "Öneriler karar destek amaçlıdır. AG bağlantıları, kablo güzergahları, faz dengesi, gerilim düşümü ve saha uygunluğu kontrol edilmeden gerçek yük aktarımı yapılmamalıdır."
                 )
 
     with tab_connection:
@@ -1279,31 +1061,16 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             "google_maps_link": "Google Maps",
         }
 
-        sim = analysis.sort_values(
-            "yeni_talep_sonrasi_yuklenme_pct",
-            ascending=False,
-            na_position="last",
-        )
+        sim = analysis.sort_values("yeni_talep_sonrasi_yuklenme_pct", ascending=False, na_position="last")
 
         st.dataframe(
             sim[sim_cols].rename(columns=sim_rename),
             use_container_width=True,
             hide_index=True,
             column_config={
-                "Mevcut Yüklenme (%)": st.column_config.ProgressColumn(
-                    min_value=0,
-                    max_value=150,
-                    format="%.1f%%",
-                ),
-                "Yeni Talep Sonrası Yüklenme (%)": st.column_config.ProgressColumn(
-                    min_value=0,
-                    max_value=150,
-                    format="%.1f%%",
-                ),
-                "Google Maps": st.column_config.LinkColumn(
-                    "Google Maps",
-                    display_text="Haritada ara",
-                ),
+                "Mevcut Yüklenme (%)": st.column_config.ProgressColumn(min_value=0, max_value=150, format="%.1f%%"),
+                "Yeni Talep Sonrası Yüklenme (%)": st.column_config.ProgressColumn(min_value=0, max_value=150, format="%.1f%%"),
+                "Google Maps": st.column_config.LinkColumn("Google Maps", display_text="Haritada ara"),
             },
         )
 
@@ -1314,9 +1081,7 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             st.warning("Eşleşen trafo yok. Veri Kalitesi sekmesini kontrol et.")
         else:
             options = matched.sort_values(["montaj_yeri", "tr_code"]).copy()
-            options["secim"] = (
-                options["montaj_yeri"].astype(str) + " / " + options["tr_code"].astype(str)
-            )
+            options["secim"] = options["montaj_yeri"].astype(str) + " / " + options["tr_code"].astype(str)
 
             selected = st.selectbox("Trafo seç", options["secim"].tolist())
             row = options[options["secim"].eq(selected)].iloc[0]
@@ -1327,7 +1092,6 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             ].sort_values("timestamp")
 
             d1, d2, d3, d4, d5 = st.columns(5)
-
             d1.metric("Trafo Gücü", fmt(row["kurulu_guc_kva"], 0, " kVA"))
             d2.metric("Algoritmik Pik", fmt(row["algoritmik_pik_demand_kva"], 2, " kVA"))
             d3.metric("Ham Maksimum", fmt(row["ham_maksimum_demand_kva"], 2, " kVA"))
@@ -1344,22 +1108,10 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
             st.link_button("Bu trafoyu Google Maps'te ara", row["google_maps_link"])
 
             fig = go.Figure()
-
-            fig.add_trace(
-                go.Scatter(
-                    x=ts["timestamp"],
-                    y=ts["demand_kva"],
-                    mode="lines+markers",
-                    name="15 dk Demand",
-                )
-            )
+            fig.add_trace(go.Scatter(x=ts["timestamp"], y=ts["demand_kva"], mode="lines+markers", name="15 dk Demand"))
 
             if pd.notna(row["algoritmik_pik_demand_kva"]):
-                fig.add_hline(
-                    y=row["algoritmik_pik_demand_kva"],
-                    line_dash="dot",
-                    annotation_text="Algoritmik Pik",
-                )
+                fig.add_hline(y=row["algoritmik_pik_demand_kva"], line_dash="dot", annotation_text="Algoritmik Pik")
 
             fig.add_hline(y=row["kurulu_guc_kva"] * 0.60, line_dash="dash", annotation_text="%60")
             fig.add_hline(y=row["kurulu_guc_kva"] * 0.80, line_dash="dash", annotation_text="%80")
@@ -1378,7 +1130,6 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
         st.subheader("Veri kalitesi ve eşleşme kontrolü")
 
         q1, q2, q3, q4, q5 = st.columns(5)
-
         q1.metric("SCADA Ham Kayıt", f"{len(scada_raw):,}")
         q2.metric("SCADA Hazırlanmış", f"{len(scada_prepared):,}")
         q3.metric("Filtrelenen Veri Hatası", f"{len(scada_errors):,}")
@@ -1421,19 +1172,8 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
         if cbs_no_data.empty:
             st.success("Kayıt yok.")
         else:
-            cols = [
-                "montaj_yeri",
-                "tr_code",
-                "asset_id",
-                "mahalle",
-                "kurulu_guc_kva",
-            ]
-
-            st.dataframe(
-                cbs_no_data[cols].rename(columns=main_rename),
-                use_container_width=True,
-                hide_index=True,
-            )
+            cols = ["montaj_yeri", "tr_code", "asset_id", "mahalle", "kurulu_guc_kva"]
+            st.dataframe(cbs_no_data[cols].rename(columns=main_rename), use_container_width=True, hide_index=True)
 
         st.markdown("#### SCADA demand var ama CBS SCADA-RTU = Evet listesinde karşılığı olmayanlar")
 
@@ -1448,7 +1188,6 @@ def hamule_recommendations(fifteen_min: pd.DataFrame) -> pd.DataFrame:
                 "SCADA `RP_4004 DM` veya `4004 DM` → CBS `B4004`; "
                 "SCADA `Enan1/Enan2` → CBS `TR1/TR2`. "
                 "H01/H03 gibi alanlar trafo kodu değil, hücre/nokta bilgisidir. "
-                "Veri hatası filtresi fiziksel olarak mantıksız değerleri ve tekil sıçrama/demeraj benzeri anomalileri eler. "
                 "Risk hesabı ham maksimumla değil, 15 dakikalık veride 2 saatlik yüksek ve stabil pencerenin ortalama demand değeriyle yapılır."
             )
 
