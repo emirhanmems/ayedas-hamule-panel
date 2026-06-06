@@ -7,7 +7,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-APP_VERSION = "v5-risk-transfer-kva"
+APP_VERSION = "v6-algoritmik-pik-transfer-kva"
 
 SCADA_FILE_CANDIDATES = [
     "Sancaktepe Trafo demand 2025.xlsx",
@@ -28,6 +28,8 @@ HIGH_RISK_LIMIT = 100
 
 DATA_ERROR_ABS_MAX_KVA = 10000
 DATA_ERROR_CAP_MULTIPLIER = 2.5
+
+ALGO_WINDOW_PERIODS = 2
 
 
 def txt(x) -> str:
@@ -187,6 +189,14 @@ def load_scada_excel(path: str) -> pd.DataFrame:
 
 
 def parse_scada_point(point_name: str):
+    """
+    SCADA -> CBS eşleşmesi:
+    T-4092      -> T4092
+    RP_4004 DM  -> B4004
+    4100 DM     -> B4100
+    Enan1       -> TR1
+    Enan2       -> TR2
+    """
     p = txt(point_name)
     parts = p.split("/")
 
@@ -394,13 +404,95 @@ def aggregate_scada(clean_scada: pd.DataFrame) -> pd.DataFrame:
     return hourly
 
 
+def score_algorithmic_peak_window(g: pd.DataFrame, window_periods: int = ALGO_WINDOW_PERIODS) -> dict:
+    """
+    İlk koddaki skor mantığını kapasite karar metriğine çevirir.
+
+    Skor = yüksek pencere ortalaması - oynaklık cezası - ani değişim cezası.
+    Kararda kullanılan değer, en iyi skorlu pencerenin ortalama demandıdır.
+    Ham maksimum ayrıca bilgi amaçlı tutulur.
+    """
+    y = g.sort_values("timestamp").copy()
+    s = y["demand_kva"].astype(float)
+
+    if y.empty:
+        return {
+            "algoritmik_pik_demand_kva": np.nan,
+            "algoritmik_pik_baslangic": pd.NaT,
+            "algoritmik_pik_bitis": pd.NaT,
+            "algoritmik_pik_skor": np.nan,
+            "ham_maksimum_demand_kva": np.nan,
+            "ham_maksimum_demand_zamani": pd.NaT,
+        }
+
+    ham_idx = s.idxmax()
+
+    if len(y) < window_periods:
+        return {
+            "algoritmik_pik_demand_kva": float(s.max()),
+            "algoritmik_pik_baslangic": y.loc[ham_idx, "timestamp"],
+            "algoritmik_pik_bitis": y.loc[ham_idx, "timestamp"],
+            "algoritmik_pik_skor": np.nan,
+            "ham_maksimum_demand_kva": float(s.max()),
+            "ham_maksimum_demand_zamani": y.loc[ham_idx, "timestamp"],
+        }
+
+    roll_mean = s.rolling(window_periods, min_periods=window_periods).mean()
+    roll_std = s.rolling(window_periods, min_periods=window_periods).std().fillna(0)
+    roll_diff = s.diff().abs().rolling(window_periods, min_periods=window_periods).mean().fillna(0)
+
+    def z(v):
+        arr = v.to_numpy(dtype=float)
+        if np.all(np.isnan(arr)):
+            return np.full_like(arr, np.nan, dtype=float)
+        mu = np.nanmean(arr)
+        sd = np.nanstd(arr)
+        if not np.isfinite(sd) or sd == 0:
+            sd = 1e-9
+        return (arr - mu) / sd
+
+    mean_z = z(roll_mean)
+    std_z = z(roll_std)
+    diff_z = z(roll_diff)
+
+    score = pd.Series((1.2 * mean_z) - (0.8 * std_z) - (0.6 * diff_z), index=y.index)
+
+    if score.dropna().empty:
+        peak_idx = ham_idx
+        algo_value = float(s.max())
+        algo_score = np.nan
+    else:
+        peak_idx = score.idxmax()
+        algo_value = float(roll_mean.loc[peak_idx])
+        algo_score = float(score.loc[peak_idx])
+
+    if len(y) > 1:
+        step = y["timestamp"].sort_values().diff().median()
+        if pd.isna(step):
+            step = pd.Timedelta(hours=1)
+    else:
+        step = pd.Timedelta(hours=1)
+
+    window_end = y.loc[peak_idx, "timestamp"]
+    window_start = window_end - step * (window_periods - 1)
+
+    return {
+        "algoritmik_pik_demand_kva": algo_value,
+        "algoritmik_pik_baslangic": window_start,
+        "algoritmik_pik_bitis": window_end,
+        "algoritmik_pik_skor": algo_score,
+        "ham_maksimum_demand_kva": float(s.max()),
+        "ham_maksimum_demand_zamani": y.loc[ham_idx, "timestamp"],
+    }
+
+
 def scada_metrics(hourly: pd.DataFrame) -> pd.DataFrame:
     rows = []
 
     for (montaj_key, tr_code), g in hourly.groupby(["montaj_key", "tr_code"]):
         y = g.sort_values("timestamp")
         s = y["demand_kva"].astype(float)
-        max_idx = s.idxmax()
+        peak = score_algorithmic_peak_window(y, window_periods=ALGO_WINDOW_PERIODS)
 
         rows.append(
             {
@@ -413,8 +505,12 @@ def scada_metrics(hourly: pd.DataFrame) -> pd.DataFrame:
                 "veri_adedi": int(len(y)),
                 "ilk_veri": y["timestamp"].min(),
                 "son_veri": y["timestamp"].max(),
-                "maksimum_demand_kva": float(s.max()),
-                "maksimum_demand_zamani": y.loc[max_idx, "timestamp"],
+                "algoritmik_pik_demand_kva": peak["algoritmik_pik_demand_kva"],
+                "algoritmik_pik_baslangic": peak["algoritmik_pik_baslangic"],
+                "algoritmik_pik_bitis": peak["algoritmik_pik_bitis"],
+                "algoritmik_pik_skor": peak["algoritmik_pik_skor"],
+                "ham_maksimum_demand_kva": peak["ham_maksimum_demand_kva"],
+                "ham_maksimum_demand_zamani": peak["ham_maksimum_demand_zamani"],
                 "ortalama_demand_kva": float(s.mean()),
                 "p95_demand_kva": float(s.quantile(0.95)),
             }
@@ -430,22 +526,22 @@ def build_analysis(cbs: pd.DataFrame, hourly: pd.DataFrame, new_request_kva: flo
     metrics = scada_metrics(hourly)
 
     if metrics.empty:
-        metrics = pd.DataFrame(columns=["montaj_key", "tr_code", "maksimum_demand_kva"])
+        metrics = pd.DataFrame(columns=["montaj_key", "tr_code", "algoritmik_pik_demand_kva"])
 
     analysis = cbs_scada.merge(metrics, on=["montaj_key", "tr_code"], how="left")
 
     analysis["yuklenme_orani_pct"] = (
-        analysis["maksimum_demand_kva"] / analysis["kurulu_guc_kva"] * 100
+        analysis["algoritmik_pik_demand_kva"] / analysis["kurulu_guc_kva"] * 100
     )
 
     analysis["risk_seviyesi"] = analysis["yuklenme_orani_pct"].apply(risk_level)
     analysis["risk_sira"] = analysis["risk_seviyesi"].apply(risk_order_value)
-    analysis["bos_kapasite_kva"] = analysis["kurulu_guc_kva"] - analysis["maksimum_demand_kva"]
+    analysis["bos_kapasite_kva"] = analysis["kurulu_guc_kva"] - analysis["algoritmik_pik_demand_kva"]
 
     request = float(new_request_kva)
 
     analysis["yeni_talep_kva"] = request
-    analysis["yeni_talep_sonrasi_demand_kva"] = analysis["maksimum_demand_kva"] + request
+    analysis["yeni_talep_sonrasi_demand_kva"] = analysis["algoritmik_pik_demand_kva"] + request
     analysis["yeni_talep_sonrasi_yuklenme_pct"] = (
         analysis["yeni_talep_sonrasi_demand_kva"] / analysis["kurulu_guc_kva"] * 100
     )
@@ -497,7 +593,7 @@ def recommend_transfer_candidates(analysis: pd.DataFrame, selected_key, transfer
             (candidates["montaj_key"].eq(row["montaj_key"]))
             & (candidates["tr_code"].eq(row["tr_code"]))
         )
-        & candidates["maksimum_demand_kva"].notna()
+        & candidates["algoritmik_pik_demand_kva"].notna()
         & candidates["yuklenme_orani_pct"].notna()
         & (candidates["yuklenme_orani_pct"] < selected_load)
         & (candidates["bos_kapasite_kva"] > 0)
@@ -508,7 +604,7 @@ def recommend_transfer_candidates(analysis: pd.DataFrame, selected_key, transfer
     if transfer > 0:
         candidates = candidates[candidates["bos_kapasite_kva"] >= transfer]
 
-    candidates["aktarim_sonrasi_demand_kva"] = candidates["maksimum_demand_kva"] + transfer
+    candidates["aktarim_sonrasi_demand_kva"] = candidates["algoritmik_pik_demand_kva"] + transfer
     candidates["aktarim_sonrasi_yuklenme_pct"] = (
         candidates["aktarim_sonrasi_demand_kva"] / candidates["kurulu_guc_kva"] * 100
     )
@@ -527,16 +623,30 @@ def hamule_recommendations(hourly: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame()
 
     recs = []
-    window = 2
 
     for (montaj_key, tr_code), g in hourly.groupby(["montaj_key", "tr_code"]):
         y = g.sort_values("timestamp").copy()
         s = y["demand_kva"].astype(float)
 
-        roll_mean = s.rolling(window, min_periods=window).mean()
-        roll_std = s.rolling(window, min_periods=window).std().fillna(0)
+        if len(y) < ALGO_WINDOW_PERIODS:
+            continue
 
-        y["score"] = roll_mean - 0.5 * roll_std
+        roll_mean = s.rolling(ALGO_WINDOW_PERIODS, min_periods=ALGO_WINDOW_PERIODS).mean()
+        roll_std = s.rolling(ALGO_WINDOW_PERIODS, min_periods=ALGO_WINDOW_PERIODS).std()
+        roll_diff = s.diff().abs().rolling(ALGO_WINDOW_PERIODS, min_periods=ALGO_WINDOW_PERIODS).mean()
+
+        def z(v):
+            arr = v.to_numpy(dtype=float)
+            if np.all(np.isnan(arr)):
+                return np.full_like(arr, np.nan, dtype=float)
+            mu = np.nanmean(arr)
+            sd = np.nanstd(arr)
+            if not np.isfinite(sd) or sd == 0:
+                sd = 1e-9
+            return (arr - mu) / sd
+
+        y["pencere_ortalama_kva"] = roll_mean
+        y["score"] = (1.2 * z(roll_mean)) - (0.8 * z(roll_std.fillna(0))) - (0.6 * z(roll_diff.fillna(0)))
 
         top = y.dropna(subset=["score"]).sort_values("score", ascending=False).head(3).copy()
 
@@ -544,7 +654,7 @@ def hamule_recommendations(hourly: pd.DataFrame) -> pd.DataFrame:
             top["montaj_key"] = montaj_key
             top["tr_code"] = tr_code
             top["window_end"] = top["timestamp"]
-            top["window_start"] = top["timestamp"] - pd.Timedelta(hours=window - 1)
+            top["window_start"] = top["timestamp"] - pd.Timedelta(hours=ALGO_WINDOW_PERIODS - 1)
 
             recs.append(
                 top[
@@ -554,6 +664,7 @@ def hamule_recommendations(hourly: pd.DataFrame) -> pd.DataFrame:
                         "window_start",
                         "window_end",
                         "demand_kva",
+                        "pencere_ortalama_kva",
                         "score",
                     ]
                 ]
@@ -570,7 +681,7 @@ def main():
 
     st.title("⚡ CBS Entegre Mahalle Bazlı Trafo Risk Analizi ve Yük Aktarım Öneri Sistemi")
     st.caption(
-        f"Sürüm: {APP_VERSION} | SCADA demand + CBS kurulu güç verisiyle risk analizi ve mahalle bazlı yük aktarım aday önerisi üretir."
+        f"Sürüm: {APP_VERSION} | Karar metriği: ilk paneldeki skor mantığıyla seçilen Algoritmik Pik Demand."
     )
 
     scada_file = find_file(SCADA_FILE_CANDIDATES)
@@ -599,11 +710,10 @@ def main():
         )
 
         st.divider()
-        st.header("Risk Sınırları")
-        st.caption("0-60%: Düşük Risk")
-        st.caption("60-80%: Orta Risk")
-        st.caption("80-100%: Yüksek Risk")
-        st.caption("100% üzeri: Kritik Risk")
+        st.header("Algoritma Notu")
+        st.caption("Algoritmik Pik = yüksek ortalama + düşük oynaklık + düşük ani değişim skoruyla seçilen 2 saatlik pencere ortalaması.")
+        st.caption("Risk hesabı: Algoritmik Pik Demand / Trafo Gücü × 100")
+        st.caption("0-60%: Düşük | 60-80%: Orta | 80-100%: Yüksek | 100% üzeri: Kritik")
 
     if not scada_file:
         st.error("SCADA Excel dosyası bulunamadı. Dosya adını repo kökünde 'Sancaktepe Trafo demand 2025.xlsx' yap.")
@@ -671,8 +781,10 @@ def main():
         "tr_code",
         "mahalle",
         "kurulu_guc_kva",
-        "maksimum_demand_kva",
-        "maksimum_demand_zamani",
+        "algoritmik_pik_demand_kva",
+        "algoritmik_pik_baslangic",
+        "algoritmik_pik_bitis",
+        "ham_maksimum_demand_kva",
         "yuklenme_orani_pct",
         "bos_kapasite_kva",
         "risk_seviyesi",
@@ -683,17 +795,22 @@ def main():
         "tr_code": "Trafo Kodu",
         "mahalle": "Mahalle",
         "kurulu_guc_kva": "Trafo Gücü (kVA)",
-        "maksimum_demand_kva": "Maksimum Demand (kVA)",
-        "maksimum_demand_zamani": "Maksimum Demand Zamanı",
+        "algoritmik_pik_demand_kva": "Algoritmik Pik Demand (kVA)",
+        "algoritmik_pik_baslangic": "Pik Pencere Başlangıcı",
+        "algoritmik_pik_bitis": "Pik Pencere Bitişi",
+        "ham_maksimum_demand_kva": "Ham Maksimum Demand (kVA)",
         "yuklenme_orani_pct": "Yüklenme Oranı (%)",
         "bos_kapasite_kva": "Boş Kapasite (kVA)",
         "risk_seviyesi": "Risk Seviyesi",
+        "asset_id": "AssetID",
+        "ilce": "İlçe",
     }
 
     with tab_risk:
         st.subheader("Riskli trafolar listesi")
         st.info(
-            "Yüklenme Oranı = Maksimum Demand / Trafo Gücü × 100. Veri hatası olan SCADA ölçümleri bu hesaba girmeden elenir."
+            "Yüklenme Oranı = Algoritmik Pik Demand / Trafo Gücü × 100. "
+            "Algoritmik pik, ilk paneldeki skor mantığıyla yüksek ve stabil pencere seçilerek hesaplanır."
         )
 
         f1, f2, f3 = st.columns([1, 1, 2])
@@ -754,7 +871,8 @@ def main():
             hide_index=True,
             column_config={
                 "Trafo Gücü (kVA)": st.column_config.NumberColumn(format="%.0f"),
-                "Maksimum Demand (kVA)": st.column_config.NumberColumn(format="%.2f"),
+                "Algoritmik Pik Demand (kVA)": st.column_config.NumberColumn(format="%.2f"),
+                "Ham Maksimum Demand (kVA)": st.column_config.NumberColumn(format="%.2f"),
                 "Yüklenme Oranı (%)": st.column_config.ProgressColumn(
                     min_value=0,
                     max_value=150,
@@ -819,7 +937,7 @@ def main():
                     "tr_code": True,
                     "mahalle": True,
                     "kurulu_guc_kva": True,
-                    "maksimum_demand_kva": True,
+                    "algoritmik_pik_demand_kva": True,
                     "yuklenme_orani_pct": ":.1f",
                     "lat": False,
                     "lon": False,
@@ -865,7 +983,7 @@ def main():
 
             overload_kva = max(
                 0.0,
-                float(selected_row["maksimum_demand_kva"] - selected_row["kurulu_guc_kva"]),
+                float(selected_row["algoritmik_pik_demand_kva"] - selected_row["kurulu_guc_kva"]),
             )
 
             default_transfer = round(overload_kva, 2) if overload_kva > 0 else 50.0
@@ -902,7 +1020,8 @@ def main():
                     "tr_code",
                     "mahalle",
                     "kurulu_guc_kva",
-                    "maksimum_demand_kva",
+                    "algoritmik_pik_demand_kva",
+                    "ham_maksimum_demand_kva",
                     "yuklenme_orani_pct",
                     "bos_kapasite_kva",
                     "aktarim_sonrasi_demand_kva",
@@ -915,7 +1034,8 @@ def main():
                     "tr_code": "Aday Trafo",
                     "mahalle": "Mahalle",
                     "kurulu_guc_kva": "Trafo Gücü (kVA)",
-                    "maksimum_demand_kva": "Mevcut Maks. Demand (kVA)",
+                    "algoritmik_pik_demand_kva": "Mevcut Algoritmik Pik (kVA)",
+                    "ham_maksimum_demand_kva": "Ham Maksimum Demand (kVA)",
                     "yuklenme_orani_pct": "Mevcut Yüklenme (%)",
                     "bos_kapasite_kva": "Boş Kapasite (kVA)",
                     "aktarim_sonrasi_demand_kva": "Aktarım Sonrası Demand (kVA)",
@@ -954,7 +1074,7 @@ def main():
             "tr_code",
             "mahalle",
             "kurulu_guc_kva",
-            "maksimum_demand_kva",
+            "algoritmik_pik_demand_kva",
             "yuklenme_orani_pct",
             "yeni_talep_kva",
             "yeni_talep_sonrasi_demand_kva",
@@ -967,7 +1087,7 @@ def main():
             "tr_code": "Trafo Kodu",
             "mahalle": "Mahalle",
             "kurulu_guc_kva": "Trafo Gücü (kVA)",
-            "maksimum_demand_kva": "Maksimum Demand (kVA)",
+            "algoritmik_pik_demand_kva": "Algoritmik Pik Demand (kVA)",
             "yuklenme_orani_pct": "Mevcut Yüklenme (%)",
             "yeni_talep_kva": "Yeni Talep (kVA)",
             "yeni_talep_sonrasi_demand_kva": "Yeni Talep Sonrası Demand (kVA)",
@@ -1021,15 +1141,16 @@ def main():
             d1, d2, d3, d4, d5 = st.columns(5)
 
             d1.metric("Trafo Gücü", fmt(row["kurulu_guc_kva"], 0, " kVA"))
-            d2.metric("Maks Demand", fmt(row["maksimum_demand_kva"], 2, " kVA"))
-            d3.metric("Yüklenme", fmt(row["yuklenme_orani_pct"], 1, "%"))
-            d4.metric("Boş Kapasite", fmt(row["bos_kapasite_kva"], 2, " kVA"))
+            d2.metric("Algoritmik Pik", fmt(row["algoritmik_pik_demand_kva"], 2, " kVA"))
+            d3.metric("Ham Maksimum", fmt(row["ham_maksimum_demand_kva"], 2, " kVA"))
+            d4.metric("Yüklenme", fmt(row["yuklenme_orani_pct"], 1, "%"))
             d5.metric("Risk", row["risk_seviyesi"])
 
             st.write(
                 f"**Mahalle:** {row['mahalle']} | "
                 f"**AssetID:** {row['asset_id']} | "
-                f"**SCADA:** {row.get('dm_label', '')} / {row.get('h_cell', '')}"
+                f"**SCADA:** {row.get('dm_label', '')} / {row.get('h_cell', '')} | "
+                f"**Algoritmik pik penceresi:** {row.get('algoritmik_pik_baslangic', '')} → {row.get('algoritmik_pik_bitis', '')}"
             )
 
             fig = go.Figure()
@@ -1039,9 +1160,16 @@ def main():
                     x=ts["timestamp"],
                     y=ts["demand_kva"],
                     mode="lines+markers",
-                    name="Demand",
+                    name="Saatlik Demand",
                 )
             )
+
+            if pd.notna(row["algoritmik_pik_demand_kva"]):
+                fig.add_hline(
+                    y=row["algoritmik_pik_demand_kva"],
+                    line_dash="dot",
+                    annotation_text="Algoritmik Pik",
+                )
 
             fig.add_hline(
                 y=row["kurulu_guc_kva"] * 0.60,
@@ -1136,13 +1264,43 @@ def main():
         else:
             st.dataframe(scada_no_cbs, use_container_width=True, hide_index=True)
 
-        with st.expander("Eşleşme ve hesaplama mantığı"):
+        with st.expander("Eşleşme ve algoritma mantığı"):
             st.write(
                 "SCADA `T-4092` → CBS `T4092`; "
                 "SCADA `RP_4004 DM` veya `4004 DM` → CBS `B4004`; "
                 "SCADA `Enan1/Enan2` → CBS `TR1/TR2`. "
                 "H01/H03 gibi alanlar trafo kodu değil, hücre/nokta bilgisidir. "
-                "Risk hesabı maksimum demand ile yapılır. Veri hatası filtresinden geçen maksimum demand, trafo gücüne bölünerek yüklenme oranı hesaplanır."
+                "Risk hesabı ham maksimumla değil, ilk paneldeki skor mantığıyla seçilen yüksek ve stabil pencerenin ortalama demand değeriyle yapılır. "
+                "Skor; pencere ortalamasını artırır, oynaklık ve ani değişim yüksekse düşürür."
+            )
+
+        st.markdown("#### Hamule / algoritmik pik pencere önerileri")
+        recs = hamule_recommendations(hourly)
+
+        if recs.empty:
+            st.info("Öneri üretilemedi.")
+        else:
+            recs = recs.merge(
+                cbs_raw[["montaj_key", "tr_code", "montaj_yeri", "mahalle", "kurulu_guc_kva"]].drop_duplicates(["montaj_key", "tr_code"]),
+                on=["montaj_key", "tr_code"],
+                how="left",
+            )
+
+            rec_cols = [
+                "montaj_yeri",
+                "tr_code",
+                "mahalle",
+                "window_start",
+                "window_end",
+                "demand_kva",
+                "pencere_ortalama_kva",
+                "score",
+            ]
+
+            st.dataframe(
+                recs[rec_cols].sort_values("score", ascending=False).head(300),
+                use_container_width=True,
+                hide_index=True,
             )
 
 
