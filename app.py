@@ -498,27 +498,9 @@ def scada_metrics(fifteen_min: pd.DataFrame) -> pd.DataFrame:
 
     return pd.DataFrame(rows)
     def build_google_search_query(row) -> str:
-    parts = [
-        "AYEDAŞ trafo",
-        txt(row.get("montaj_yeri", "")),
-        txt(row.get("tr_code", "")),
-        txt(row.get("mahalle", "")),
-        txt(row.get("ilce", "")) or "Sancaktepe",
-        "İstanbul Türkiye",
-    ]
-    return " ".join([p for p in parts if p])
+    def build_google_search_query(row) -> str: return " ".join([p for p in ["AYEDAŞ trafo", txt(row.get("montaj_yeri", "")), txt(row.get("tr_code", "")), txt(row.get("mahalle", "")), txt(row.get("ilce", "")) or "Sancaktepe", "İstanbul Türkiye"] if p])
 
-
-def add_google_map_fields(df: pd.DataFrame) -> pd.DataFrame:
-    out = df.copy()
-    out["google_maps_arama"] = out.apply(build_google_search_query, axis=1)
-    out["google_maps_link"] = out["google_maps_arama"].apply(
-        lambda q: "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)
-    )
-    out["google_maps_embed"] = out["google_maps_arama"].apply(
-        lambda q: "https://www.google.com/maps?q=" + quote_plus(q) + "&output=embed"
-    )
-    return out
+def add_google_map_fields(df: pd.DataFrame) -> pd.DataFrame: return df.copy().assign(google_maps_arama=lambda x: x.apply(build_google_search_query, axis=1), google_maps_link=lambda x: x["google_maps_arama"].apply(lambda q: "https://www.google.com/maps/search/?api=1&query=" + quote_plus(q)), google_maps_embed=lambda x: x["google_maps_arama"].apply(lambda q: "https://www.google.com/maps?q=" + quote_plus(q) + "&output=embed"))
 
 
 def build_analysis(cbs: pd.DataFrame, fifteen_min: pd.DataFrame, new_request_kva: float):
